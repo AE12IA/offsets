@@ -42,7 +42,7 @@ Download or view `offsets.json`, `offsets.hpp`, `offsets.py`, or `Offsets.cs` fr
 Switch to the [branches list](../../branches) and find the proper version branch (`version-xxxxxxxxxxxxxxxx`). All offset files are preserved there.
 
 <p align="center">
-  <img src="images/banner3.png" alt="Offsets Version Branches" width="70%">
+  <img src="images/banner3.jpg" alt="Offsets Version Branches" width="70%">
 </p>
 
 **3. Query versions automatically:**  
