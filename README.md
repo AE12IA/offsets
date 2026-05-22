@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/banner1.png" alt="Roblox FFlag Offsets Banner" width="70%" />
+  <img src="images/banner1.jpg" alt="Roblox FFlag Offsets Banner" width="70%" />
 </p>
 
 <h1 align="center">fflag-offsets</h1>
