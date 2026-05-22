@@ -2,7 +2,7 @@
   <img src="images/banner1.jpg" alt="Roblox FFlag Offsets Banner" width="70%" />
 </p>
 
-<h1 align="center">fflag-offsets</h1>
+<h1 align="center">FFlag offsets</h1>
 
 <p align="center">
   <b>Up-to-date Roblox FFlag/offset dumps for modding, scripting, and research purposes.</b>
