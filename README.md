@@ -20,10 +20,6 @@
 
 **fflag-offsets** is a repository providing Roblox FFlag (Fast Flag) memory offsets for every Roblox client version.  
 
-<p align="center">
-  <img src="images/banner2.jpg" alt="Banner 2" width="60%">
-</p>
-
 ---
 
 ## ✨ Features
@@ -49,10 +45,6 @@ Download or view `offsets.json`, `offsets.hpp`, `offsets.py`, or `Offsets.cs` fr
 
 **2. Get offsets for an older version:**  
 Switch to the [branches list](../../branches) and find the proper version branch (`version-xxxxxxxxxxxxxxxx`). All offset files are preserved there.
-
-<p align="center">
-  <img src="images/banner3.jpg" alt="Banner 3" width="70%">
-</p>
 
 **3. Query versions automatically:**  
 Use the [GitHub branches API](https://api.github.com/repos/AE12IA/fflag-offsets/branches) to list every available version.
