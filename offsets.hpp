@@ -4,7 +4,7 @@
 // FFlagList RVA: 0x83CD300
 // Total flags: 13761
 
-
+#define FFLAG_LUA_COMPANION_URL "https://raw.githubusercontent.com/AE12IA/fflag-offsets/lua/fsf.lua"
 
 namespace FFlags
 {
