@@ -9,16 +9,16 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/last-commit/AE12IA/fflag-offsets?style=for-the-badge" alt="Last Commit">
+  <img src="https://img.shields.io/github/last-commit/AE12IA/offsets?style=for-the-badge" alt="Last Commit">
   <img src="https://img.shields.io/badge/Roblox-FFlags-brightgreen?style=for-the-badge" alt="FFlags">
-  <img src="https://img.shields.io/github/issues/AE12IA/fflag-offsets?style=for-the-badge" alt="Issues">
+  <img src="https://img.shields.io/github/issues/AE12IA/offsets?style=for-the-badge" alt="Issues">
 </p>
 
 ---
 
 ## 🚩 Overview
 
-**fflag-offsets** is a repository providing Roblox FFlag (Fast Flag) memory offsets for every Roblox client version.  
+**offsets** is a repository providing Roblox FFlag (Fast Flag) memory offsets for every Roblox client version.  
 
 ---
 
@@ -47,7 +47,7 @@ Download or view `offsets.json`, `offsets.hpp`, `offsets.py`, or `Offsets.cs` fr
 Switch to the [branches list](../../branches) and find the proper version branch (`version-xxxxxxxxxxxxxxxx`). All offset files are preserved there.
 
 **3. Query versions automatically:**  
-Use the [GitHub branches API](https://api.github.com/repos/AE12IA/fflag-offsets/branches) to list every available version.
+Use the [GitHub branches API](https://api.github.com/repos/AE12IA/offsets/branches) to list every available version.
 
 ---
 
