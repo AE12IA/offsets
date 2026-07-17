@@ -1,0 +1,31 @@
+name: Mirror imtheo fflags
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mirror fflags to version branches
+        env:
+          GIT_AUTHOR_NAME: AE12IA
+          GIT_AUTHOR_EMAIL: ae12ia@users.noreply.github.com
+          GIT_COMMITTER_NAME: AE12IA
+          GIT_COMMITTER_EMAIL: ae12ia@users.noreply.github.com
+        run: python scripts/mirror_imtheo.py
