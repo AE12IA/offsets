@@ -2,7 +2,7 @@ name: Mirror imtheo fflags
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:
