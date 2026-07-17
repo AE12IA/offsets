@@ -188,6 +188,95 @@ def iter_candidates(versions: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def remote_version_branches() -> set[str]:
+    proc = run(["git", "ls-remote", "--heads", "origin"], check=False)
+    out: set[str] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        ref = parts[1]
+        if ref.startswith("refs/heads/version-"):
+            out.add(ref[len("refs/heads/") :])
+    return out
+
+
+def parse_iso_ts(iso: str) -> float:
+    if not iso:
+        return 0.0
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def build_versions_index(theo_versions: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Public index for the Leviathan site picker (version + publish date)."""
+    present = remote_version_branches()
+    index: list[dict[str, str]] = []
+    for entry in theo_versions:
+        version = str(entry.get("version") or "")
+        if version not in present:
+            continue
+        if "fflags.hpp" not in files_available_names(entry):
+            continue
+        date = str(
+            entry.get("last_updated")
+            or entry.get("created_at")
+            or entry.get("updated_at")
+            or ""
+        )
+        index.append({"version": version, "date": date})
+
+    index.sort(
+        key=lambda item: (parse_iso_ts(item["date"]), item["version"]),
+        reverse=True,
+    )
+    return index
+
+
+def update_versions_json(theo_versions: list[dict[str, Any]], dry_run: bool = False) -> bool:
+    root = repo_root()
+    run(["git", "checkout", "main"], cwd=root, check=False)
+    run(["git", "pull", "--ff-only", "origin", "main"], cwd=root, check=False)
+
+    index = build_versions_index(theo_versions)
+    payload = (json.dumps(index, indent=2) + "\n").encode("utf-8")
+    path = os.path.join(root, "versions.json")
+
+    if os.path.exists(path) and open(path, "rb").read() == payload:
+        print("versions.json: unchanged")
+        return False
+
+    if dry_run:
+        print(f"versions.json: would_update ({len(index)} entries)")
+        return False
+
+    with open(path, "wb") as fh:
+        fh.write(payload)
+
+    run(["git", "add", "versions.json"], cwd=root)
+    diff = run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
+    if diff.returncode == 0:
+        return False
+
+    run(
+        [
+            "git",
+            "commit",
+            "-m",
+            f"Update versions.json ({len(index)} mirrored versions)",
+        ],
+        cwd=root,
+        env=git_identity_env(),
+    )
+    run(["git", "push", "origin", "main"], cwd=root)
+    print(f"versions.json: updated ({len(index)} entries)")
+    return True
+
+
 def sync_version(version: str, dry_run: bool = False) -> str:
     hpp, json_bytes = download_fflags(version)
     if hpp is None:
@@ -235,6 +324,8 @@ def main() -> int:
         status = sync_version(version, dry_run=args.dry_run)
         results[status].append(version)
         print(f"{version}: {status}")
+
+    update_versions_json(versions, dry_run=args.dry_run)
 
     print(json.dumps({k: len(v) for k, v in results.items()}, indent=2))
     if results["updated"]:
