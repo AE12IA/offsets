@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -88,23 +89,31 @@ def remote_file_sha256(version: str, filename: str) -> str | None:
         raise
 
 
-def download_fflags(version: str) -> tuple[bytes | None, bytes | None]:
-    hpp_url = f"{BASE_URL}/{version}/fflags.hpp"
+def download_file_pair(version: str, hpp_name: str, json_name: str) -> tuple[bytes | None, bytes | None]:
+    hpp_url = f"{BASE_URL}/{version}/{hpp_name}"
     try:
         hpp = http_get(hpp_url)
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        if exc.code in (403, 404):
             return None, None
         raise
 
     json_bytes: bytes | None = None
-    json_url = f"{BASE_URL}/{version}/fflags.json"
+    json_url = f"{BASE_URL}/{version}/{json_name}"
     try:
         json_bytes = http_get(json_url)
     except urllib.error.HTTPError as exc:
-        if exc.code != 404:
+        if exc.code not in (403, 404):
             raise
     return hpp, json_bytes
+
+
+def download_fflags(version: str) -> tuple[bytes | None, bytes | None]:
+    return download_file_pair(version, "fflags.hpp", "fflags.json")
+
+
+def download_offsets(version: str) -> tuple[bytes | None, bytes | None]:
+    return download_file_pair(version, "offsets.hpp", "offsets.json")
 
 
 def git_identity_env() -> dict[str, str]:
@@ -151,14 +160,13 @@ def write_mirror_files(hpp: bytes, json_bytes: bytes | None) -> list[str]:
     return changed
 
 
-def commit_and_push(version: str, changed: list[str]) -> bool:
+def commit_and_push(version: str, changed: list[str], message: str) -> bool:
     root = repo_root()
     run(["git", "add", *changed], cwd=root)
     diff = run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
     if diff.returncode == 0:
         return False
-    msg = f"Mirror fflags.hpp from offsets.imtheo.lol as offsets.hpp for {version}"
-    run(["git", "commit", "-m", msg], cwd=root, env=git_identity_env())
+    run(["git", "commit", "-m", message], cwd=root, env=git_identity_env())
     run(["git", "push", "origin", version], cwd=root)
     return True
 
@@ -176,16 +184,73 @@ def needs_update(version: str, hpp: bytes, json_bytes: bytes | None) -> bool:
     return False
 
 
-def iter_candidates(versions: list[dict[str, Any]]) -> list[str]:
-    out: list[str] = []
+def iter_candidates(versions: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Return (version, source) pairs. source is 'fflags' or 'offsets'."""
+    out: list[tuple[str, str]] = []
     for entry in versions:
         version = entry.get("version") or ""
         if not version.startswith("version-"):
             continue
-        if "fflags.hpp" not in files_available_names(entry):
-            continue
-        out.append(version)
+        names = files_available_names(entry)
+        if "fflags.hpp" in names:
+            out.append((version, "fflags"))
+        elif "offsets.hpp" in names:
+            out.append((version, "offsets"))
     return out
+
+
+def normalize_file_version(raw: str) -> str:
+    parts = [p.strip() for p in re.split(r"[,\s]+", raw.strip()) if p.strip()]
+    if len(parts) < 4:
+        return ""
+    return ".".join(parts[:4])
+
+
+def fetch_deploy_history_map() -> dict[str, str]:
+    """Map version-hash -> Roblox FileVersion (e.g. 0.728.0.7280895)."""
+    try:
+        text = http_get("https://setup.rbxcdn.com/DeployHistory.txt").decode(
+            "utf-8", errors="replace"
+        )
+    except Exception as exc:
+        print(f"DeployHistory: skipped ({exc})")
+        return {}
+
+    out: dict[str, str] = {}
+    pattern = re.compile(
+        r"WindowsPlayer\s+(version-[0-9a-fA-F]+)\s+at.*?file version:\s*([0-9,\s]+)",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(text):
+        version = match.group(1)
+        client = normalize_file_version(match.group(2))
+        if client and version not in out:
+            out[version] = client
+    return out
+
+
+def fetch_build_map() -> dict[str, str]:
+    """Map FileVersion -> version-hash from repo main."""
+    try:
+        data = json.loads(http_get(f"{RAW_GITHUB}/main/build_map.json").decode("utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v}
+
+
+def client_label_for_version(
+    version: str,
+    deploy_map: dict[str, str],
+    build_map: dict[str, str],
+) -> str:
+    if version in deploy_map:
+        return deploy_map[version]
+    for client, mapped in build_map.items():
+        if mapped == version:
+            return client
+    return ""
 
 
 def remote_version_branches() -> set[str]:
@@ -212,26 +277,38 @@ def parse_iso_ts(iso: str) -> float:
         return 0.0
 
 
-def build_versions_index(theo_versions: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Public index for the Leviathan site picker (version + publish date)."""
+def build_versions_index(theo_versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Public index for the Leviathan site picker."""
     present = remote_version_branches()
-    index: list[dict[str, str]] = []
-    for entry in theo_versions:
-        version = str(entry.get("version") or "")
-        if version not in present:
-            continue
-        if "fflags.hpp" not in files_available_names(entry):
-            continue
+    deploy_map = fetch_deploy_history_map()
+    build_map = fetch_build_map()
+    theo_by_version = {
+        str(entry.get("version") or ""): entry for entry in theo_versions if entry.get("version")
+    }
+
+    index: list[dict[str, Any]] = []
+    for version in sorted(present):
+        entry = theo_by_version.get(version, {})
+        names = files_available_names(entry) if entry else set()
+        has_fflags = "fflags.hpp" in names if names else True
         date = str(
             entry.get("last_updated")
             or entry.get("created_at")
             or entry.get("updated_at")
             or ""
         )
-        index.append({"version": version, "date": date})
+        item: dict[str, Any] = {
+            "version": version,
+            "date": date,
+            "has_fflags": has_fflags,
+        }
+        client = client_label_for_version(version, deploy_map, build_map)
+        if client:
+            item["client"] = client
+        index.append(item)
 
     index.sort(
-        key=lambda item: (parse_iso_ts(item["date"]), item["version"]),
+        key=lambda item: (parse_iso_ts(str(item.get("date") or "")), str(item["version"])),
         reverse=True,
     )
     return index
@@ -277,8 +354,11 @@ def update_versions_json(theo_versions: list[dict[str, Any]], dry_run: bool = Fa
     return True
 
 
-def sync_version(version: str, dry_run: bool = False) -> str:
-    hpp, json_bytes = download_fflags(version)
+def sync_version(version: str, source: str, dry_run: bool = False) -> str:
+    if source == "fflags":
+        hpp, json_bytes = download_fflags(version)
+    else:
+        hpp, json_bytes = download_offsets(version)
     if hpp is None:
         return "skip_404"
 
@@ -294,7 +374,9 @@ def sync_version(version: str, dry_run: bool = False) -> str:
         run(["git", "checkout", "main"], cwd=repo_root(), check=False)
         return "skip_unchanged"
 
-    pushed = commit_and_push(version, changed)
+    label = "fflags.hpp" if source == "fflags" else "offsets.hpp"
+    msg = f"Mirror {label} from offsets.imtheo.lol as offsets.hpp for {version}"
+    pushed = commit_and_push(version, changed, msg)
     run(["git", "checkout", "main"], cwd=repo_root(), check=False)
     return "updated" if pushed else "skip_unchanged"
 
@@ -311,7 +393,7 @@ def main() -> int:
     candidates = iter_candidates(versions)
     if args.versions:
         wanted = set(args.versions)
-        candidates = [v for v in candidates if v in wanted]
+        candidates = [(v, s) for v, s in candidates if v in wanted]
 
     results: dict[str, list[str]] = {
         "updated": [],
@@ -320,10 +402,10 @@ def main() -> int:
         "would_update": [],
     }
 
-    for version in candidates:
-        status = sync_version(version, dry_run=args.dry_run)
+    for version, source in candidates:
+        status = sync_version(version, source, dry_run=args.dry_run)
         results[status].append(version)
-        print(f"{version}: {status}")
+        print(f"{version} ({source}): {status}")
 
     update_versions_json(versions, dry_run=args.dry_run)
 
