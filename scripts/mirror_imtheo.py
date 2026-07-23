@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Mirror Theo's fflags dumps into AE12IA/offsets version branches."""
+"""Mirror Theo dumps into AE12IA/offsets on a single branch: fflag_offset.
+
+Layout (cuts off old fflag clients that still hit version-*/offsets.hpp):
+  branch fflag_offset/
+    versions.json
+    prefixes.json      (seeded from main, left alone unless present)
+    build_map.json     (seeded from main)
+    version-<hash>/
+      offsets.hpp
+      offsets.json     (optional)
+
+Theo source stays offsets.imtheo.lol. Old main + version-* branches are frozen.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +28,8 @@ from typing import Any
 
 BASE_URL = "https://offsets.imtheo.lol"
 RAW_GITHUB = "https://raw.githubusercontent.com/AE12IA/offsets"
-USER_AGENT = "AE12IA-offsets-mirror/1.0 (github.com/AE12IA/offsets)"
+INDEX_BRANCH = "fflag_offset"
+USER_AGENT = "AE12IA-offsets-mirror/1.1 (github.com/AE12IA/offsets; fflag_offset)"
 
 
 def repo_root() -> str:
@@ -74,13 +87,24 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def remote_branch_exists(version: str) -> bool:
-    proc = run(["git", "ls-remote", "--heads", "origin", version], check=False)
+def git_identity_env() -> dict[str, str]:
+    name = os.environ.get("GIT_AUTHOR_NAME", "AE12IA")
+    email = os.environ.get("GIT_AUTHOR_EMAIL", "ae12ia@users.noreply.github.com")
+    return {
+        "GIT_AUTHOR_NAME": name,
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": os.environ.get("GIT_COMMITTER_NAME", name),
+        "GIT_COMMITTER_EMAIL": os.environ.get("GIT_COMMITTER_EMAIL", email),
+    }
+
+
+def remote_branch_exists(branch: str) -> bool:
+    proc = run(["git", "ls-remote", "--heads", "origin", branch], check=False)
     return bool(proc.stdout.strip())
 
 
-def remote_file_sha256(version: str, filename: str) -> str | None:
-    url = f"{RAW_GITHUB}/{version}/{filename}"
+def remote_file_sha256(relpath: str) -> str | None:
+    url = f"{RAW_GITHUB}/{INDEX_BRANCH}/{relpath}"
     try:
         return sha256_bytes(http_get(url))
     except urllib.error.HTTPError as exc:
@@ -90,18 +114,16 @@ def remote_file_sha256(version: str, filename: str) -> str | None:
 
 
 def download_file_pair(version: str, hpp_name: str, json_name: str) -> tuple[bytes | None, bytes | None]:
-    hpp_url = f"{BASE_URL}/{version}/{hpp_name}"
     try:
-        hpp = http_get(hpp_url)
+        hpp = http_get(f"{BASE_URL}/{version}/{hpp_name}")
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 404):
             return None, None
         raise
 
     json_bytes: bytes | None = None
-    json_url = f"{BASE_URL}/{version}/{json_name}"
     try:
-        json_bytes = http_get(json_url)
+        json_bytes = http_get(f"{BASE_URL}/{version}/{json_name}")
     except urllib.error.HTTPError as exc:
         if exc.code not in (403, 404):
             raise
@@ -116,76 +138,71 @@ def download_offsets(version: str) -> tuple[bytes | None, bytes | None]:
     return download_file_pair(version, "offsets.hpp", "offsets.json")
 
 
-def git_identity_env() -> dict[str, str]:
-    name = os.environ.get("GIT_AUTHOR_NAME", "AE12IA")
-    email = os.environ.get("GIT_AUTHOR_EMAIL", "ae12ia@users.noreply.github.com")
-    return {
-        "GIT_AUTHOR_NAME": name,
-        "GIT_AUTHOR_EMAIL": email,
-        "GIT_COMMITTER_NAME": os.environ.get("GIT_COMMITTER_NAME", name),
-        "GIT_COMMITTER_EMAIL": os.environ.get("GIT_COMMITTER_EMAIL", email),
-    }
-
-
-def prepare_branch(version: str) -> None:
+def ensure_index_branch() -> None:
+    """Checkout fflag_offset, creating it from main on first run."""
     root = repo_root()
-    run(["git", "fetch", "origin", "main"], cwd=root, check=False)
-    if remote_branch_exists(version):
-        run(["git", "fetch", "origin", version], cwd=root, check=False)
-        run(["git", "checkout", version], cwd=root)
-        proc = run(["git", "rev-parse", f"origin/{version}"], cwd=root, check=False)
+    run(["git", "fetch", "origin"], cwd=root, check=False)
+
+    if remote_branch_exists(INDEX_BRANCH):
+        run(["git", "fetch", "origin", INDEX_BRANCH], cwd=root, check=False)
+        run(["git", "checkout", INDEX_BRANCH], cwd=root)
+        proc = run(["git", "rev-parse", f"origin/{INDEX_BRANCH}"], cwd=root, check=False)
         if proc.returncode == 0 and proc.stdout.strip():
-            run(["git", "reset", "--hard", f"origin/{version}"], cwd=root)
-    else:
-        run(["git", "checkout", "main"], cwd=root)
-        run(["git", "pull", "--ff-only", "origin", "main"], cwd=root, check=False)
-        run(["git", "checkout", "-B", version], cwd=root)
+            run(["git", "reset", "--hard", f"origin/{INDEX_BRANCH}"], cwd=root)
+        return
+
+    # First-time seed from main (keeps prefixes.json / build_map.json if present)
+    run(["git", "fetch", "origin", "main"], cwd=root, check=False)
+    run(["git", "checkout", "main"], cwd=root, check=False)
+    run(["git", "pull", "--ff-only", "origin", "main"], cwd=root, check=False)
+    run(["git", "checkout", "-B", INDEX_BRANCH], cwd=root)
+    print(f"{INDEX_BRANCH}: created from main")
 
 
-def write_mirror_files(hpp: bytes, json_bytes: bytes | None) -> list[str]:
+def write_version_files(version: str, hpp: bytes, json_bytes: bytes | None) -> list[str]:
     root = repo_root()
+    folder = os.path.join(root, version)
+    os.makedirs(folder, exist_ok=True)
     changed: list[str] = []
-    hpp_path = os.path.join(root, "offsets.hpp")
+
+    hpp_path = os.path.join(folder, "offsets.hpp")
     if not os.path.exists(hpp_path) or open(hpp_path, "rb").read() != hpp:
         with open(hpp_path, "wb") as fh:
             fh.write(hpp)
-        changed.append("offsets.hpp")
+        changed.append(f"{version}/offsets.hpp")
 
     if json_bytes is not None:
-        json_path = os.path.join(root, "offsets.json")
+        json_path = os.path.join(folder, "offsets.json")
         if not os.path.exists(json_path) or open(json_path, "rb").read() != json_bytes:
             with open(json_path, "wb") as fh:
                 fh.write(json_bytes)
-            changed.append("offsets.json")
+            changed.append(f"{version}/offsets.json")
     return changed
 
 
-def commit_and_push(version: str, changed: list[str], message: str) -> bool:
-    root = repo_root()
-    run(["git", "add", *changed], cwd=root)
-    diff = run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
-    if diff.returncode == 0:
-        return False
-    run(["git", "commit", "-m", message], cwd=root, env=git_identity_env())
-    run(["git", "push", "origin", version], cwd=root)
-    return True
-
-
 def needs_update(version: str, hpp: bytes, json_bytes: bytes | None) -> bool:
-    if not remote_branch_exists(version):
-        return True
-    remote_hpp = remote_file_sha256(version, "offsets.hpp")
+    remote_hpp = remote_file_sha256(f"{version}/offsets.hpp")
     if remote_hpp != sha256_bytes(hpp):
         return True
     if json_bytes is not None:
-        remote_json = remote_file_sha256(version, "offsets.json")
+        remote_json = remote_file_sha256(f"{version}/offsets.json")
         if remote_json != sha256_bytes(json_bytes):
             return True
     return False
 
 
+def commit_and_push(changed: list[str], message: str) -> bool:
+    root = repo_root()
+    run(["git", "add", "--", *changed], cwd=root)
+    diff = run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
+    if diff.returncode == 0:
+        return False
+    run(["git", "commit", "-m", message], cwd=root, env=git_identity_env())
+    run(["git", "push", "-u", "origin", INDEX_BRANCH], cwd=root)
+    return True
+
+
 def iter_candidates(versions: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Return (version, source) pairs. source is 'fflags' or 'offsets'."""
     out: list[tuple[str, str]] = []
     for entry in versions:
         version = entry.get("version") or ""
@@ -207,7 +224,6 @@ def normalize_file_version(raw: str) -> str:
 
 
 def fetch_deploy_history_map() -> dict[str, str]:
-    """Map version-hash -> Roblox FileVersion (e.g. 0.728.0.7280895)."""
     try:
         text = http_get("https://setup.rbxcdn.com/DeployHistory.txt").decode(
             "utf-8", errors="replace"
@@ -230,14 +246,31 @@ def fetch_deploy_history_map() -> dict[str, str]:
 
 
 def fetch_build_map() -> dict[str, str]:
-    """Map FileVersion -> version-hash from repo main."""
     try:
-        data = json.loads(http_get(f"{RAW_GITHUB}/main/build_map.json").decode("utf-8"))
+        data = json.loads(
+            http_get(f"{RAW_GITHUB}/{INDEX_BRANCH}/build_map.json").decode("utf-8")
+        )
     except Exception:
-        return {}
+        try:
+            data = json.loads(http_get(f"{RAW_GITHUB}/main/build_map.json").decode("utf-8"))
+        except Exception:
+            return {}
     if not isinstance(data, dict):
         return {}
     return {str(k): str(v) for k, v in data.items() if v}
+
+
+def local_mirrored_versions() -> set[str]:
+    root = repo_root()
+    out: set[str] = set()
+    try:
+        for name in os.listdir(root):
+            if name.startswith("version-") and os.path.isdir(os.path.join(root, name)):
+                if os.path.isfile(os.path.join(root, name, "offsets.hpp")):
+                    out.add(name)
+    except FileNotFoundError:
+        pass
+    return out
 
 
 def client_label_for_version(
@@ -253,19 +286,6 @@ def client_label_for_version(
     return ""
 
 
-def remote_version_branches() -> set[str]:
-    proc = run(["git", "ls-remote", "--heads", "origin"], check=False)
-    out: set[str] = set()
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        ref = parts[1]
-        if ref.startswith("refs/heads/version-"):
-            out.add(ref[len("refs/heads/") :])
-    return out
-
-
 def parse_iso_ts(iso: str) -> float:
     if not iso:
         return 0.0
@@ -278,8 +298,7 @@ def parse_iso_ts(iso: str) -> float:
 
 
 def build_versions_index(theo_versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Public index for the Leviathan site picker."""
-    present = remote_version_branches()
+    present = local_mirrored_versions()
     deploy_map = fetch_deploy_history_map()
     build_map = fetch_build_map()
     theo_by_version = {
@@ -314,71 +333,43 @@ def build_versions_index(theo_versions: list[dict[str, Any]]) -> list[dict[str, 
     return index
 
 
-def update_versions_json(theo_versions: list[dict[str, Any]], dry_run: bool = False) -> bool:
-    root = repo_root()
-    run(["git", "checkout", "main"], cwd=root, check=False)
-    run(["git", "pull", "--ff-only", "origin", "main"], cwd=root, check=False)
-
+def write_versions_json(theo_versions: list[dict[str, Any]], dry_run: bool = False) -> list[str]:
     index = build_versions_index(theo_versions)
     payload = (json.dumps(index, indent=2) + "\n").encode("utf-8")
-    path = os.path.join(root, "versions.json")
+    path = os.path.join(repo_root(), "versions.json")
 
     if os.path.exists(path) and open(path, "rb").read() == payload:
         print("versions.json: unchanged")
-        return False
+        return []
 
     if dry_run:
         print(f"versions.json: would_update ({len(index)} entries)")
-        return False
+        return []
 
     with open(path, "wb") as fh:
         fh.write(payload)
-
-    run(["git", "add", "versions.json"], cwd=root)
-    diff = run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
-    if diff.returncode == 0:
-        return False
-
-    run(
-        [
-            "git",
-            "commit",
-            "-m",
-            f"Update versions.json ({len(index)} mirrored versions)",
-        ],
-        cwd=root,
-        env=git_identity_env(),
-    )
-    run(["git", "push", "origin", "main"], cwd=root)
-    print(f"versions.json: updated ({len(index)} entries)")
-    return True
+    print(f"versions.json: staged ({len(index)} entries)")
+    return ["versions.json"]
 
 
-def sync_version(version: str, source: str, dry_run: bool = False) -> str:
+def sync_version(version: str, source: str, dry_run: bool = False) -> tuple[str, list[str]]:
     if source == "fflags":
         hpp, json_bytes = download_fflags(version)
     else:
         hpp, json_bytes = download_offsets(version)
     if hpp is None:
-        return "skip_404"
+        return "skip_404", []
 
     if not needs_update(version, hpp, json_bytes):
-        return "skip_unchanged"
+        return "skip_unchanged", []
 
     if dry_run:
-        return "would_update"
+        return "would_update", []
 
-    prepare_branch(version)
-    changed = write_mirror_files(hpp, json_bytes)
+    changed = write_version_files(version, hpp, json_bytes)
     if not changed:
-        run(["git", "checkout", "main"], cwd=repo_root(), check=False)
-        return "skip_unchanged"
-
-    label = "fflags.hpp" if source == "fflags" else "offsets.hpp"
-    msg = f"Mirror {label} from offsets.imtheo.lol as offsets.hpp for {version}"
-    pushed = commit_and_push(version, changed, msg)
-    run(["git", "checkout", "main"], cwd=repo_root(), check=False)
-    return "updated" if pushed else "skip_unchanged"
+        return "skip_unchanged", []
+    return "updated", changed
 
 
 def main() -> int:
@@ -388,7 +379,11 @@ def main() -> int:
     args = parser.parse_args()
 
     os.chdir(repo_root())
-    run(["git", "checkout", "main"], check=False)
+    if not args.dry_run:
+        ensure_index_branch()
+    else:
+        run(["git", "fetch", "origin"], check=False)
+
     versions = fetch_versions()
     candidates = iter_candidates(versions)
     if args.versions:
@@ -401,13 +396,28 @@ def main() -> int:
         "skip_404": [],
         "would_update": [],
     }
+    pending: list[str] = []
+    messages: list[str] = []
 
     for version, source in candidates:
-        status = sync_version(version, source, dry_run=args.dry_run)
+        status, changed = sync_version(version, source, dry_run=args.dry_run)
         results[status].append(version)
         print(f"{version} ({source}): {status}")
+        if changed:
+            pending.extend(changed)
+            label = "fflags.hpp" if source == "fflags" else "offsets.hpp"
+            messages.append(f"Mirror {label} → {INDEX_BRANCH}/{version}/offsets.hpp")
 
-    update_versions_json(versions, dry_run=args.dry_run)
+    pending.extend(write_versions_json(versions, dry_run=args.dry_run))
+
+    if pending and not args.dry_run:
+        msg = messages[0] if len(messages) == 1 else (
+            f"Mirror Theo dumps on {INDEX_BRANCH} ({len(results['updated'])} versions)"
+        )
+        if "versions.json" in pending and not messages:
+            msg = f"Update versions.json on {INDEX_BRANCH}"
+        pushed = commit_and_push(pending, msg)
+        print(f"push {INDEX_BRANCH}: {'ok' if pushed else 'nothing'}")
 
     print(json.dumps({k: len(v) for k, v in results.items()}, indent=2))
     if results["updated"]:

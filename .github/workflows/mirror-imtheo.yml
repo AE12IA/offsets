@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Mirror offsets to version branches
+      - name: Mirror Theo dumps onto fflag_offset branch
         env:
           GIT_AUTHOR_NAME: AE12IA
           GIT_AUTHOR_EMAIL: ae12ia@users.noreply.github.com
