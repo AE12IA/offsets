@@ -37,7 +37,8 @@
   {
     "version": "version-5cf2272675e145f5",
     "date": "2026-06-30T20:34:00.277Z",
-    "has_fflags": true
+    "has_fflags": true,
+    "client": "0.728.0.7280895"
   },
   {
     "version": "version-1a951716f19e4638",
