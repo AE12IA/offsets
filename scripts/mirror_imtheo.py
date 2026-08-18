@@ -22,14 +22,19 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-BASE_URL = "https://offsets.imtheo.lol"
+BASE_URLS = [
+    "https://offsets.imtheo.lol",
+]
 RAW_GITHUB = "https://raw.githubusercontent.com/AE12IA/offsets"
 INDEX_BRANCH = "fflag_offset"
-USER_AGENT = "AE12IA-offsets-mirror/1.1 (github.com/AE12IA/offsets; fflag_offset)"
+USER_AGENT = "AE12IA-offsets-mirror/1.2 (github.com/AE12IA/offsets; fflag_offset)"
+HTTP_TIMEOUT = 45
+HTTP_RETRIES = 4
 
 
 def repo_root() -> str:
@@ -50,24 +55,87 @@ def run(
     merged = os.environ.copy()
     if env:
         merged.update(env)
-    return subprocess.run(
+    proc = subprocess.run(
         args,
         cwd=cwd or repo_root(),
-        check=check,
+        check=False,
         text=True,
         capture_output=True,
         env=merged,
     )
+    if check and proc.returncode != 0:
+        print(f"$ {' '.join(args)}", file=sys.stderr)
+        if proc.stdout:
+            print(proc.stdout, file=sys.stderr)
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr)
+        raise SystemExit(f"command failed ({proc.returncode}): {' '.join(args)}")
+    return proc
 
 
 def http_get(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return resp.read()
+    last_exc: Exception | None = None
+    for attempt in range(1, HTTP_RETRIES + 1):
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return resp.read()
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            wait = min(20, 2 ** attempt)
+            print(f"http retry {attempt}/{HTTP_RETRIES} {url} ({exc}); wait {wait}s")
+            if attempt < HTTP_RETRIES:
+                time.sleep(wait)
+    raise last_exc if last_exc else RuntimeError(f"GET failed: {url}")
+
+
+def theo_get(path: str) -> bytes:
+    last_exc: Exception | None = None
+    for base in BASE_URLS:
+        url = f"{base.rstrip('/')}/{path.lstrip('/')}"
+        try:
+            return http_get(url)
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            print(f"theo host failed {url}: {exc}")
+    raise last_exc if last_exc else RuntimeError(f"theo GET failed: {path}")
+
+
+def fetch_live_version() -> str:
+    raw = theo_get("roblox/version").decode("utf-8", errors="replace").strip()
+    # Sometimes JSON {"version":"version-..."} sometimes plain text
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            raw = str(data.get("version") or data.get("clientVersion") or "").strip()
+        except json.JSONDecodeError:
+            pass
+    if not raw.startswith("version-"):
+        raise SystemExit(f"Unexpected live version: {raw[:120]!r}")
+    return raw.split()[0]
 
 
 def fetch_versions() -> list[dict[str, Any]]:
-    data = json.loads(http_get(f"{BASE_URL}/versions").decode("utf-8"))
+    try:
+        data = json.loads(theo_get("versions").decode("utf-8"))
+    except Exception as exc:
+        print(f"/versions unavailable ({exc}); falling back to live version only")
+        live = fetch_live_version()
+        return [
+            {
+                "version": live,
+                "files_available": [
+                    "fflags.hpp",
+                    "fflags.json",
+                    "offsets.hpp",
+                    "offsets.json",
+                ],
+            }
+        ]
     if not isinstance(data, list):
         raise SystemExit("Unexpected versions payload")
     return data
@@ -115,18 +183,23 @@ def remote_file_sha256(relpath: str) -> str | None:
 
 def download_file_pair(version: str, hpp_name: str, json_name: str) -> tuple[bytes | None, bytes | None]:
     try:
-        hpp = http_get(f"{BASE_URL}/{version}/{hpp_name}")
+        hpp = theo_get(f"{version}/{hpp_name}")
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 404):
             return None, None
         raise
+    except Exception as exc:
+        print(f"{version}/{hpp_name}: skip ({exc})")
+        return None, None
 
     json_bytes: bytes | None = None
     try:
-        json_bytes = http_get(f"{BASE_URL}/{version}/{json_name}")
+        json_bytes = theo_get(f"{version}/{json_name}")
     except urllib.error.HTTPError as exc:
         if exc.code not in (403, 404):
             raise
+    except Exception as exc:
+        print(f"{version}/{json_name}: skip json ({exc})")
     return hpp, json_bytes
 
 
@@ -400,7 +473,12 @@ def main() -> int:
     messages: list[str] = []
 
     for version, source in candidates:
-        status, changed = sync_version(version, source, dry_run=args.dry_run)
+        try:
+            status, changed = sync_version(version, source, dry_run=args.dry_run)
+        except Exception as exc:
+            print(f"{version} ({source}): error {exc}")
+            results["skip_404"].append(version)
+            continue
         results[status].append(version)
         print(f"{version} ({source}): {status}")
         if changed:
