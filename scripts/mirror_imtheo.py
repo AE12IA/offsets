@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -29,12 +30,23 @@ from typing import Any
 
 BASE_URLS = [
     "https://offsets.imtheo.lol",
+    "https://imtheo.lol/Offsets",
 ]
 RAW_GITHUB = "https://raw.githubusercontent.com/AE12IA/offsets"
 INDEX_BRANCH = "fflag_offset"
-USER_AGENT = "AE12IA-offsets-mirror/1.2 (github.com/AE12IA/offsets; fflag_offset)"
-HTTP_TIMEOUT = 45
-HTTP_RETRIES = 4
+USER_AGENT = "AE12IA-offsets-mirror/1.3 (github.com/AE12IA/offsets; fflag_offset)"
+HTTP_TIMEOUT = 25
+HTTP_RETRIES = 2
+
+
+def force_ipv4() -> None:
+    """GitHub-hosted runners often hang on IPv6 to some CDNs until timeout."""
+    orig = socket.getaddrinfo
+
+    def ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return orig(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = ipv4_only  # type: ignore[assignment]
 
 
 def repo_root() -> str:
@@ -106,17 +118,24 @@ def theo_get(path: str) -> bytes:
 
 
 def fetch_live_version() -> str:
-    raw = theo_get("roblox/version").decode("utf-8", errors="replace").strip()
-    # Sometimes JSON {"version":"version-..."} sometimes plain text
-    if raw.startswith("{"):
-        try:
-            data = json.loads(raw)
-            raw = str(data.get("version") or data.get("clientVersion") or "").strip()
-        except json.JSONDecodeError:
-            pass
-    if not raw.startswith("version-"):
-        raise SystemExit(f"Unexpected live version: {raw[:120]!r}")
-    return raw.split()[0]
+    try:
+        raw = theo_get("roblox/version").decode("utf-8", errors="replace").strip()
+        if raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+                raw = str(data.get("version") or data.get("clientVersion") or "").strip()
+            except json.JSONDecodeError:
+                pass
+        if raw.startswith("version-"):
+            return raw.split()[0]
+    except Exception as exc:
+        print(f"/roblox/version failed ({exc}); trying homepage")
+
+    html = theo_get("").decode("utf-8", errors="replace")
+    match = re.search(r"version-[0-9a-fA-F]{8,}", html)
+    if not match:
+        raise RuntimeError("could not parse live version from homepage")
+    return match.group(0)
 
 
 def fetch_versions() -> list[dict[str, Any]]:
@@ -451,13 +470,19 @@ def main() -> int:
     parser.add_argument("--versions", nargs="*")
     args = parser.parse_args()
 
+    force_ipv4()
     os.chdir(repo_root())
     if not args.dry_run:
         ensure_index_branch()
     else:
         run(["git", "fetch", "origin"], check=False)
 
-    versions = fetch_versions()
+    try:
+        versions = fetch_versions()
+    except Exception as exc:
+        print(f"theo unreachable ({exc}); keeping existing fflag_offset mirror")
+        return 0
+
     candidates = iter_candidates(versions)
     if args.versions:
         wanted = set(args.versions)
